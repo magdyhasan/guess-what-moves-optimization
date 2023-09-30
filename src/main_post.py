@@ -63,7 +63,7 @@ def main(args):
                                                  max_iter=cfg.SOLVER.MAX_ITER,
                                                  max_to_keep=None if cfg.FLAGS.KEEP_ALL else 5,
                                                  file_prefix='checkpoint')
-    checkpoint = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=args.resume_path is not None)
+    checkpoint = checkpointer.resume_or_load(args.resume_path, resume=args.resume_path is not None)
     iteration = 0 if args.resume_path is None else checkpoint['iteration']
 
     train_loader, val_loader = config.loaders(cfg)
@@ -72,7 +72,7 @@ def main(args):
     # sample = next(iter(loader))
 
     criterions = {
-        'reconstruction': (losses.ReconstructionLoss(cfg, model), cfg.GWM.LOSS_MULT.REC, lambda x: 1)}
+        'consistency': (losses.ConsistencyLoss(cfg, model), cfg.GWM.LOSS_MULT.REC, lambda x: 1)}
 
     criterion = losses.CriterionDict(criterions)
 
@@ -102,66 +102,39 @@ def main(args):
     total_iter = cfg.TOTAL_ITER if cfg.TOTAL_ITER else cfg.SOLVER.MAX_ITER  # early stop
     with torch.autograd.set_detect_anomaly(cfg.DEBUG) and \
          tqdm(initial=iteration, total=total_iter, disable=utils.environment.is_slurm()) as pbar:
-        while iteration < total_iter:
+        while iteration < total_iter + 10000:
             for sample in train_loader:
 
-                if cfg.MODEL.META_ARCHITECTURE != 'UNET' and cfg.FLAGS.UNFREEZE_AT:
-                    if hasattr(model.backbone, 'frozen_stages'):
-                        assert cfg.MODEL.BACKBONE.FREEZE_AT == -1, f"MODEL initial parameters forced frozen"
-                        stages = [s for s, m in cfg.FLAGS.UNFREEZE_AT]
-                        milest = [m for s, m in cfg.FLAGS.UNFREEZE_AT]
-                        pos = bisect.bisect_right(milest, iteration) - 1
-                        if pos >= 0:
-                            curr_setting = model.backbone.frozen_stages
-                            if curr_setting != stages[pos]:
-                                logger.info(f"Updating backbone freezing stages from {curr_setting} to {stages[pos]}")
-                                model.backbone.frozen_stages = stages[pos]
-                                model.train()
-                    else:
-                        assert cfg.MODEL.BACKBONE.FREEZE_AT == -1, f"MODEL initial parameters forced frozen"
-                        stages = [s for s, m in cfg.FLAGS.UNFREEZE_AT]
-                        milest = [m for s, m in cfg.FLAGS.UNFREEZE_AT]
-                        pos = bisect.bisect_right(milest, iteration) - 1
-                        freeze(model, set=False)
-                        freeze(model.sem_seg_head.predictor, set=True)
-                        if pos >= 0:
-                            stage = stages[pos]
-                            if stage <= 2:
-                                freeze(model.sem_seg_head, set=True)
-                            if stage <= 1:
-                                freeze(model.backbone, set=True)
-                        model.train()
-
-                else:
-                    logger.debug_once(f'Unfreezing disabled schedule: {cfg.FLAGS.UNFREEZE_AT}')
+                freeze(model, set=False)
+                # # freeze(model.sem_seg_head.predictor, set=True)
+                freeze(model.sem_seg_head, set=True)
 
                 sample = [e for s in sample for e in s]
-                flow_key = 'flow'
                 raw_sem_seg = False
-                if cfg.GWM.FLOW_RES is not None:
-                    flow_key = 'flow_big'
-                    raw_sem_seg = cfg.MODEL.SEM_SEG_HEAD.PIXEL_DECODER_NAME == 'MegaBigPixelDecoder'
 
-                flow = torch.stack([x[flow_key].to(model.device) for x in sample]).clip(-20, 20)
+                # flow = torch.stack([x['flow'].to(model.device) for x in sample]).clip(-20, 20)
+                flow = torch.stack([x['flow'].to(model.device) for x in sample])
                 logger.debug_once(f'flow shape: {flow.shape}')
-                preds = model.forward_base(sample, keys=cfg.GWM.SAMPLE_KEYS, get_eval=True, raw_sem_seg=raw_sem_seg)
+
+                # r_flow = torch.stack([x['r_flow'].to(model.device) for x in sample]).clip(-20, 20)
+                r_flow = torch.stack([x['r_flow'].to(model.device) for x in sample])
+                logger.debug_once(f'r_flow shape: {flow.shape}')
+
+                preds = model.forward_base2(sample, keys=cfg.GWM.SAMPLE_KEYS, get_eval=True, raw_sem_seg=raw_sem_seg)
                 masks_raw = torch.stack([x['sem_seg'] for x in preds], 0)
+                masks_raw2 = torch.stack([x['sem_seg'] for x in preds], 0)
                 logger.debug_once(f'mask shape: {masks_raw.shape}')
                 masks_softmaxed_list = [torch.softmax(masks_raw, dim=1)]
-
+                masks_softmaxed_list2 = [torch.softmax(masks_raw2, dim=1)]
+                gt_seg = torch.stack([x['sem_seg_ori'] for x in sample]).to(model.device).float()
+                gt_seg2 = torch.stack([x['sem_seg_ori2'] for x in sample]).to(model.device).float()
 
                 total_losses = []
                 log_dicts = []
-                for mask_idx, masks_softmaxed in enumerate(masks_softmaxed_list):
+                for mask_idx, (masks_softmaxed, masks_softmaxed2) in enumerate(zip(masks_softmaxed_list, masks_softmaxed_list2)):
 
-                    loss, log_dict = criterion(sample, flow, masks_softmaxed, iteration)
+                    loss, log_dict = criterion(sample, masks_softmaxed, masks_softmaxed2, flow, r_flow, gt_seg, gt_seg2)
 
-                    if cfg.GWM.USE_MULT_FLOW:
-                        flow2 = torch.stack([x[flow_key + '_2'].to(model.device) for x in sample]).clip(-20, 20)
-                        other_loss, other_log_dict = criterion(sample, flow2, masks_softmaxed, iteration)
-                        loss = loss / 2 + other_loss / 2
-                        for k, v in other_log_dict.items():
-                            log_dict[k] = other_log_dict[k] / 2 + v / 2
                     total_losses.append(loss)
                     log_dicts.append(log_dict)
 
@@ -210,27 +183,21 @@ def main(args):
                     if cfg.WANDB.ENABLE:
                         wandb.log(train_log_dict, step=iteration + 1)
 
-                if (iteration + 1) % cfg.LOG_FREQ == 0 or (iteration + 1) in [1, 50, 500]:
+                if (iteration + 1) % 3 == 0 or (iteration + 1) in [1, 50, 500]:
                     model.eval()
-                    if writer:
-                        flow = torch.stack([x['flow'].to(model.device) for x in sample]).clip(-20, 20)
-                        image_viz, header_text = get_unsup_image_viz(model, cfg, sample, criterion)
-                        header = get_vis_header(image_viz.size(2), flow.size(3), header_text)
-                        image_viz = torch.cat([header, image_viz], dim=1)
-                        writer.add_image('train/images', image_viz, iteration + 1)
                     if cfg.WANDB.ENABLE and (iteration + 1) % 2500 == 0:
                         image_viz = get_unsup_image_viz(model, cfg, sample)
                         wandb.log({'train/viz': wandb.Image(image_viz.float())}, step=iteration + 1)
 
                     if iou := eval_unsupmf(cfg=cfg, val_loader=val_loader, model=model, criterion=criterion,
-                                           writer=writer, writer_iteration=iteration + 1, use_wandb=cfg.WANDB.ENABLE):
+                                           writer=None, writer_iteration=iteration + 1, use_wandb=cfg.WANDB.ENABLE):
                         if cfg.SOLVER.CHECKPOINT_PERIOD and iou > iou_best:
                             iou_best = iou
                             if not args.wandb_sweep_mode:
                                 checkpointer.save(name='checkpoint_best', iteration=iteration + 1, loss=loss,
                                                   iou=iou_best)
                             logger.info(f'New best IoU {iou_best:.02f} after iteration {iteration + 1}')
-                        # wandb.log({'eval/IoU': iou}, step=iteration + 1)
+                        wandb.log({'eval/IoU': iou}, step=iteration + 1)
                         if cfg.WANDB.ENABLE:
                             wandb.log({'eval/IoU_best': iou_best}, step=iteration + 1)
                         if writer:
@@ -264,7 +231,7 @@ def get_argparse_args():
 
 
 if __name__ == "__main__":
-    wandb.init("GWMO")
+    wandb.init("GWMOV1")
     args = get_argparse_args().parse_args()
     if args.resume_path:
         args.config_file = "/".join(args.resume_path.split('/')[:-2]) + '/config.yaml'

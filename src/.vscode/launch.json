@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "args": [
+                "--resume_path", "../outputs/stv2/20230705_004149_te/checkpoints/checkpoint_0019999.pth",
+                // "--resume_path", "../outputs/stv2/20230621_000357/checkpoints/checkpoint_0019999.pth",
+                // "--resume_path", "../outputs/davis/20230717_080400/checkpoints/checkpoint_0014999.pth",
+                "GWM.DATASET",
+                "STv2",
+                "LOG_ID",
+                "stv2",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

@@ -9,7 +9,7 @@ import torch.utils.data
 from detectron2.config import CfgNode as CN
 
 import utils
-from datasets import FlowPairDetectron, FlowEvalDetectron
+from datasets import FlowPairDetectron, FlowEvalDetectron, FlowPostDetectron, FlowSSLDetectron, FlowSSLVIDDetectron
 
 logger = logging.getLogger('gwm')
 
@@ -42,7 +42,7 @@ def scan_train_flow(folders, res, pairs, basepath):
     return flow_dir
 
 
-def setup_dataset(cfg=None, multi_val=False):
+def setup_dataset(cfg=None, multi_val=False, val_seq_arg = []):
     dataset_str = cfg.GWM.DATASET
     if '+' in dataset_str:
         datasets = dataset_str.split('+')
@@ -66,29 +66,30 @@ def setup_dataset(cfg=None, multi_val=False):
     trainval_data_dir = None
 
     if cfg.GWM.DATASET == 'DAVIS':
-        basepath = '/DAVIS2016'
-        img_dir = '/DAVIS2016/JPEGImages/480p'
-        gt_dir = '/DAVIS2016/Annotations/480p'
+        basepath = '/DAVIS'
+        img_dir = '/DAVIS/JPEGImages/480p'
+        gt_dir = '/DAVIS/Annotations/480p'
 
-        val_flow_dir = '/DAVIS2016/Flows_gap1/1080p'
-        val_seq = ['dog', 'cows', 'goat', 'camel', 'libby', 'parkour', 'soapbox', 'blackswan', 'bmx-trees',
-                   'kite-surf', 'car-shadow', 'breakdance', 'dance-twirl', 'scooter-black', 'drift-chicane',
-                   'motocross-jump', 'horsejump-high', 'drift-straight', 'car-roundabout', 'paragliding-launch']
+        val_flow_dir = '/DAVIS/Flows_gap1/'
+        # val_seq = ['dog', 'cows', 'goat', 'camel', 'libby', 'parkour', 'soapbox', 'blackswan', 'bmx-trees',
+        #            'kite-surf', 'car-shadow', 'breakdance', 'dance-twirl', 'scooter-black', 'drift-chicane',
+        #            'motocross-jump', 'horsejump-high', 'drift-straight', 'car-roundabout', 'paragliding-launch']
+        val_seq = ['camel'] 
         val_data_dir = [val_flow_dir, img_dir, gt_dir]
-        res = "1080p"
+        res = ""
 
     elif cfg.GWM.DATASET in ['FBMS']:
         basepath = '/FBMS_clean'
         img_dir = '/FBMS_clean/JPEGImages/'
         gt_dir = '/FBMS_clean/Annotations/'
 
-        val_flow_dir = '/FBMS_val/Flows_gap1/'
+        val_flow_dir = '/FBMS_clean/Flows_gap1/'
         val_seq = ['camel01', 'cars1', 'cars10', 'cars4', 'cars5', 'cats01', 'cats03', 'cats06',
                    'dogs01', 'dogs02', 'farm01', 'giraffes01', 'goats01', 'horses02', 'horses04',
                    'horses05', 'lion01', 'marple12', 'marple2', 'marple4', 'marple6', 'marple7', 'marple9',
                    'people03', 'people1', 'people2', 'rabbits02', 'rabbits03', 'rabbits04', 'tennis']
-        val_img_dir = '/FBMS_val/JPEGImages/'
-        val_gt_dir = '/FBMS_val/Annotations/'
+        val_img_dir = '/FBMS_clean/JPEGImages/'
+        val_gt_dir = '/FBMS_clean/Annotations/'
         val_data_dir = [val_flow_dir, val_img_dir, val_gt_dir]
         with_gt = False
         pairs = [3, 6, -3, -6]
@@ -96,11 +97,12 @@ def setup_dataset(cfg=None, multi_val=False):
     elif cfg.GWM.DATASET in ['STv2']:
         basepath = '/SegTrackv2'
         img_dir = '/SegTrackv2/JPEGImages'
-        gt_dir = '/SegTrackv2/Annotations'
+        gt_dir = '/SegTrackv2/annotations'
 
         val_flow_dir = '/SegTrackv2/Flows_gap1/'
-        val_seq = ['drift', 'birdfall', 'girl', 'cheetah', 'worm', 'parachute', 'monkeydog',
-                   'hummingbird', 'soldier', 'bmx', 'frog', 'penguin', 'monkey', 'bird_of_paradise']
+        # val_seq = ['drift', 'birdfall', 'girl', 'cheetah', 'worm', 'parachute', 'monkeydog',
+        #            'hummingbird', 'soldier', 'bmx', 'frog', 'penguin', 'monkey', 'bird_of_paradise']
+        val_seq = ['bmx']
         val_data_dir = [val_flow_dir, img_dir, gt_dir]
 
     else:
@@ -111,6 +113,8 @@ def setup_dataset(cfg=None, multi_val=False):
     root_path_str = cfg.GWM.DATA_ROOT
     logger.info(f"Found DATA_ROOT in config: {root_path_str}")
     root_path_str = '../data'
+    root_path_str = '/storage/user/mahmo/temp/ssl-vos/data'
+    val_seq = val_seq_arg
 
     if root_path_str.startswith('/'):
         root_path = Path(f"/{root_path_str.lstrip('/').rstrip('/')}")
@@ -137,15 +141,22 @@ def setup_dataset(cfg=None, multi_val=False):
 
     enable_photometric_augmentations = cfg.FLAGS.INF_TPS
 
-    train_dataset = FlowPairDetectron(data_dir=data_dir,
-                                      resolution=resolution,
-                                      to_rgb=cfg.GWM.FLOW2RGB,
-                                      size_divisibility=cfg.MODEL.MASK_FORMER.SIZE_DIVISIBILITY if not cfg.FLAGS.IGNORE_SIZE_DIV else -1,
-                                      enable_photo_aug=enable_photometric_augmentations,
-                                      flow_clip=cfg.GWM.FLOW_CLIP,
-                                      norm=cfg.GWM.FLOW_NORM,
-                                      force1080p=force1080p,
-                                      flow_res=cfg.GWM.FLOW_RES, )
+    # train_dataset = FlowPairDetectron(data_dir=data_dir,
+    #                                   resolution=resolution,
+    #                                   to_rgb=cfg.GWM.FLOW2RGB,
+    #                                   size_divisibility=cfg.MODEL.MASK_FORMER.SIZE_DIVISIBILITY if not cfg.FLAGS.IGNORE_SIZE_DIV else -1,
+    #                                   enable_photo_aug=enable_photometric_augmentations,
+    #                                   flow_clip=cfg.GWM.FLOW_CLIP,
+    #                                   norm=cfg.GWM.FLOW_NORM,
+    #                                   force1080p=force1080p,
+    #                                   flow_res=cfg.GWM.FLOW_RES, )
+    train_dataset = FlowSSLVIDDetectron(data_dir=val_data_dir,
+                                    resolution=resolution,
+                                    pair_list=pairs,
+                                    val_seq=val_seq,
+                                    size_divisibility=cfg.MODEL.MASK_FORMER.SIZE_DIVISIBILITY if not cfg.FLAGS.IGNORE_SIZE_DIV else -1,
+                                    flow_clip=cfg.GWM.FLOW_CLIP,
+                                    norm=cfg.GWM.FLOW_NORM)
     if multi_val:
         print(f"Using multiple validation datasets from {val_data_dir}")
         val_dataset = [FlowEvalDetectron(data_dir=val_data_dir,
@@ -218,8 +229,8 @@ def setup_dataset(cfg=None, multi_val=False):
     return train_dataset, val_dataset
 
 
-def loaders(cfg):
-    train_dataset, val_dataset = setup_dataset(cfg)
+def loaders(cfg, val_seq = []):
+    train_dataset, val_dataset = setup_dataset(cfg, val_seq_arg= val_seq)
     logger.info(f"Sourcing data from {val_dataset.data_dir[0]}")
 
     if cfg.FLAGS.DEV_DATA:
@@ -236,13 +247,14 @@ def loaders(cfg):
                                                num_workers=cfg.DATALOADER.NUM_WORKERS,
                                                batch_size=cfg.SOLVER.IMS_PER_BATCH,
                                                collate_fn=lambda x: x,
-                                               shuffle=True,
+                                               shuffle=False,
                                                pin_memory=True,
                                                drop_last=True,
                                                persistent_workers=cfg.DATALOADER.NUM_WORKERS > 0,
                                                worker_init_fn=utils.random_state.worker_init_function,
                                                generator=g
                                                )
+    
     val_loader = torch.utils.data.DataLoader(val_dataset,
                                              num_workers=cfg.DATALOADER.NUM_WORKERS,
                                              batch_size=1,
@@ -359,17 +371,17 @@ def add_gwm_config(cfg):
     cfg.FLAGS.IGNORE_TMP = True
 
     cfg.WANDB = CN()
-    cfg.WANDB.ENABLE = False
+    cfg.WANDB.ENABLE = True
     cfg.WANDB.BASEDIR = '../'
 
     cfg.DEBUG = False
 
     cfg.LOG_ID = 'exp'
-    cfg.LOG_FREQ = 250
+    cfg.LOG_FREQ = 50
     cfg.OUTPUT_BASEDIR = '../outputs'
     cfg.SLURM = False
     cfg.SKIP_TB = False
-    cfg.TOTAL_ITER = 20000
+    cfg.TOTAL_ITER = 30000
     cfg.CONFIG_FILE = None
 
     if os.environ.get('SLURM_JOB_ID', None):

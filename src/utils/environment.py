@@ -24,7 +24,7 @@ def user():
 
 
 def is_slurm():
-    return 'SLURM_JOB_ID' in os.environ and os.environ['SLURM_JOB_NAME'] not in  ['zsh', 'bash']
+    return False # 'SLURM_JOB_ID' in os.environ and os.environ['SLURM_JOB_NAME'] not in  ['zsh', 'bash']
 
 
 def get_slurm_id():

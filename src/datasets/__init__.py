@@ -1,2 +1,5 @@
 from .flow_eval_detectron import FlowEvalDetectron
 from .flow_pair_detectron import FlowPairDetectron
+from .flow_post_detectron import FlowPostDetectron
+from .flow_ssl_detectron import FlowSSLDetectron
+from .flow_ssl_vid_detectron import FlowSSLVIDDetectron

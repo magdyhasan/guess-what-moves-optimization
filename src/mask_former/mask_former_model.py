@@ -271,6 +271,88 @@ class MaskFormer(nn.Module):
 
         return losses, processed_results
 
+    def forward_base2(self, batched_inputs, keys, get_train=False, get_eval=False, raw_sem_seg=False):
+        for i, key in enumerate(keys):
+            images = [x[key].to(self.device) for x in batched_inputs]
+            images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+            images = ImageList.from_tensors(images, self.size_divisibility)
+            logger.debug_once(f"Maskformer input {key} shape: {images.tensor.shape}")
+            out = self.backbone(images.tensor)
+
+            images2 = [x['rgb2'].to(self.device) for x in batched_inputs]
+            images2 = [(x - self.pixel_mean) / self.pixel_std for x in images2]
+            images2 = ImageList.from_tensors(images2, self.size_divisibility)
+            logger.debug_once(f"Maskformer input {key} shape: {images2.tensor.shape}")
+            out2 = self.backbone(images.tensor)
+
+            if i == 0:
+                features = out
+                features2 = out2
+            else:
+                features = {k: torch.cat([features[k], v], 1) for k, v in out.items()}
+        outputs = self.sem_seg_head(features)
+        outputs2 = self.sem_seg_head(features2)
+
+        if get_eval:
+            # mask_cls_results = outputs["pred_logits"]
+            mask_pred_results = outputs["pred_masks"]
+            mask_pred_results2 = outputs2["pred_masks"]
+            mask_cls_results = mask_pred_results
+            logger.debug_once(f"Maskformer mask_pred_results shape: {mask_pred_results.shape}")
+            # upsample masks
+            # mask_pred_results = interpolate_or_crop(
+            #     mask_pred_results,
+            #     size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+            #     mode="bilinear",
+            #     align_corners=False,
+            # )
+
+            processed_results = []
+            for mask_cls_result, mask_pred_result, mask_pred_result2, input_per_image, image_size in zip(
+                    mask_cls_results, mask_pred_results, mask_pred_results2, batched_inputs, images.image_sizes
+            ):
+
+                height = input_per_image.get("height", image_size[0])
+                width = input_per_image.get("width", image_size[1])
+                logger.debug_once(f"Maskformer mask_pred_results target HW: {height, width}")
+                r = interpolate_or_crop(mask_pred_result[None], size=(height, width), mode="bilinear", align_corners=False)[0]
+                r2 = interpolate_or_crop(mask_pred_result2[None], size=(height, width), mode="bilinear", align_corners=False)[0]
+
+                processed_results.append({"sem_seg": r, "sem_seg2": r2})
+
+            del outputs
+
+            if not get_train:
+                return processed_results
+
+        return processed_results
+    
+    def forward_base_vid(self, batched_inputs, keys, get_train=False, get_eval=False, raw_sem_seg=False):
+        batches_output = []
+        for batched_input in batched_inputs:
+            vid_output = []
+            for frame in batched_input:
+                images = [frame['rgb'].to(self.device)]
+                images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+                images = ImageList.from_tensors(images, self.size_divisibility)
+
+                logger.debug_once(f"Maskformer input rgb shape: {images.tensor.shape}")
+                
+                features_frame = out = self.backbone(images.tensor)
+                out = self.sem_seg_head(features_frame)
+
+                image_size = images.image_sizes[0]
+                height = frame.get("height", image_size[0])
+                width = frame.get("width", image_size[1])
+                logger.debug_once(f"Maskformer mask_pred_results target HW: {height, width}")
+                # out2 = self.mask_merger(out["pred_masks"])
+                out2 = out["pred_masks"]
+                out = interpolate_or_crop(out2[None], size=(height, width), mode="bilinear", align_corners=False)[0]
+
+                vid_output.append(out)
+            batches_output.append(vid_output)
+
+        return batches_output
 
     def prepare_targets(self, targets, images):
         h, w = images.tensor.shape[-2:]

@@ -72,7 +72,7 @@ class PytorchRNGState(torch.nn.Module):
             state_dict[self.__CUDA_PRNG_STATE__] = cuda_state
         return state_dict
 
-    def load_state_dict(self, state_dict, strict=True):
+    def load_state_dict(self, state_dict, strict=False):
         random.setstate(state_dict.pop(self.__RANDOM_PRNG_STATE__))
         np.random.set_state(state_dict.pop(self.__NUMPY_PRNG_STATE__))
         torch.set_rng_state(state_dict.pop(self.__TORCH_PRNG_STATE__))

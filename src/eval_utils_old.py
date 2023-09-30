@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from sklearn.cluster import SpectralClustering
 from tqdm import tqdm
+import os
 
 import flow_reconstruction
 from utils import visualisation, log, grid
@@ -39,8 +40,6 @@ def autosized_default_font(size_limit: float) -> ImageFont.ImageFont:
 
 
 def iou(masks, gt, thres=0.5):
-    # masks.shape 1, 2, 264, 480.
-    # gt.shape 264, 480
     masks = (masks > thres).float()
     intersect = torch.tensordot(masks, gt, dims=([-2, -1], [0, 1]))
     union = masks.sum(dim=[-2, -1]) + gt.sum(dim=[-2, -1]) - intersect
@@ -83,14 +82,14 @@ def get_image_vis(model, cfg, sample, preds, criterion):
     masks_pred = masks_softmaxed
     rec_flows = criterion.flow_reconstruction(sample, criterion.process_flow(sample, flow), masks_softmaxed)
     rec_headers = ['rec_flow']
-    if len(rec_flows) > 1:
-        rec_headers.append('rec_bwd_flow')
+    # if len(rec_flows) > 1:
+    #     rec_headers.append('rec_bwd_flow')
 
     rgb = torch.stack([x['rgb'] for x in sample])
-    flow = criterion.viz_flow(criterion.process_flow(sample, flow).cpu()) * 255
-    rec_flows = [
-        (criterion.viz_flow(rec_flow_.detach().cpu().cpu()) * 255).clip(0, 255).to(torch.uint8) for rec_flow_ in rec_flows
-    ]
+    # flow = criterion.viz_flow(criterion.process_flow(sample, flow).cpu()) * 255
+    # rec_flows = [
+    #     (criterion.viz_flow(rec_flow_.detach().cpu().cpu()) * 255).clip(0, 255).to(torch.uint8) for rec_flow_ in rec_flows
+    # ]
 
 
     gt_labels = torch.stack([x['sem_seg'] for x in sample])
@@ -173,45 +172,6 @@ def is_2comp_dataset(dataset):
                  'FBMS',
                  'STv2']
 
-def eval_unsupmf_masks(samples):
-    ious_davis_eval = defaultdict(list)
-    ious = defaultdict(list)
-
-    for idx, sample_i in enumerate(tqdm(samples)):
-        sample = [sample_i]
-        category = [s['category'] for s in sample]
-
-        masks = sample[0]['masks_softmaxed']
-        gt_seg = torch.stack([x['sem_seg_ori'] for x in sample]).cpu()
-        HW = gt_seg.shape[-2:]
-        if HW != masks.shape[-2:]:
-            logger.info_once(f"Upsampling predicted masks to {HW} for evaluation")
-            masks_softmaxed_sel = F.interpolate(masks[None, :].detach().cpu(), size=HW, mode='bilinear', align_corners=False)[0]
-        else:
-            masks_softmaxed_sel = masks.detach().cpu()
-        masks_ = einops.rearrange(masks_softmaxed_sel[None, :], '(b t) s h w -> b t s 1 h w', t=1).detach()
-        gt_seg = einops.rearrange(gt_seg, 'b h w -> b 1 h w').float()
-        for i in range(masks_.size(0)):
-            masks_k = F.interpolate(masks_[i], size=(1, gt_seg.shape[-2], gt_seg.shape[-1]))  # t s 1 h w
-            mask_iou = iou(masks_k[:, :, 0], gt_seg[i, 0], thres=0.5)  # t s
-            iou_max, slot_max = mask_iou.max(dim=1)
-
-            ious[category[i][0]].append(iou_max)
-            frame_id = category[i][1]
-            ious_davis_eval[category[i][0]].append((frame_id.strip().replace('.png', ''), iou_max))
-
-    frameious = sum(ious.values(), [])
-    frame_mean_iou = torch.cat(frameious).sum().item() * 100 / len(frameious)
-    # if 'DAVIS' in cfg.GWM.DATASET.split('+')[0]:
-    #     logger.info_once("Using DAVIS evaluator methods for evaluting IoU -- mean of mean of sequences without first frame")
-    #     seq_scores = dict()
-    #     for c in ious_davis_eval:
-    #         seq_scores[c] = np.nanmean([v.item() for n, v in ious_davis_eval[c] if int(n) > 1])
-
-    #     frame_mean_iou = np.nanmean(list(seq_scores.values())) * 100
-
-    return frame_mean_iou
-
 def eval_unsupmf(cfg, val_loader, model, criterion, writer=None, writer_iteration=0, use_wandb=False):
     logger.info(f'Running Evaluation: {cfg.LOG_ID} {"Simple" if cfg.GWM.SIMPLE_REC else "Gradient"}:')
     logger.info(f'Model mode: {"train" if model.training else "eval"}, wandb: {use_wandb}')
@@ -221,7 +181,8 @@ def eval_unsupmf(cfg, val_loader, model, criterion, writer=None, writer_iteratio
     if cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES > 2:
         merger = MaskMerger(cfg, model)
 
-    print_idxs = random.sample(range(len(val_loader)), k=10)
+    # print_idxs = random.sample(range(len(val_loader)), k=10)
+    print_idxs = range(len(val_loader))
 
     images_viz = []
     ious_davis_eval = defaultdict(list)
@@ -234,16 +195,22 @@ def eval_unsupmf(cfg, val_loader, model, criterion, writer=None, writer_iteratio
         preds = model.forward_base(sample, keys=cfg.GWM.SAMPLE_KEYS, get_eval=True)
         masks_raw = torch.stack([x['sem_seg'] for x in preds], 0)
 
+        
+        out_root = 'stv2_gwmov1_ori/'
+        os.makedirs(out_root + category[0][0], exist_ok=True)
+
         masks_softmaxed = torch.softmax(masks_raw, dim=1)
         if merger == None:
             masks_dict = {'cos': masks_softmaxed}
         else:
             masks_dict = merger(sample, masks_softmaxed)
+        # np.save(out_root + category[0][0] + '/' + category[0][1].replace('.png', ''), masks_dict.cpu().numpy())
+        # continue
 
-        if writer and idx in print_idxs:
-            flow = torch.stack([x['flow'] for x in sample]).to(model.device)
-            img_viz, header_text = get_image_vis(model, cfg, sample, preds, criterion)
-            images_viz.append(img_viz)
+        # if writer and idx in print_idxs:
+        #     flow = torch.stack([x['flow'] for x in sample]).to(model.device)
+        #     img_viz, header_text = get_image_vis(model, cfg, sample, preds, criterion)
+        #     images_viz.append(img_viz)
 
         masks = masks_dict['cos']
         gt_seg = torch.stack([x['sem_seg_ori'] for x in sample]).cpu()
@@ -253,6 +220,8 @@ def eval_unsupmf(cfg, val_loader, model, criterion, writer=None, writer_iteratio
             masks_softmaxed_sel = F.interpolate(masks.detach().cpu(), size=HW, mode='bilinear', align_corners=False)
         else:
             masks_softmaxed_sel = masks.detach().cpu()
+        f_mask = masks_softmaxed_sel.argmax(1)
+        
         masks_ = einops.rearrange(masks_softmaxed_sel, '(b t) s h w -> b t s 1 h w', t=t).detach()
         gt_seg = einops.rearrange(gt_seg, 'b h w -> b 1 h w').float()
         for i in range(masks_.size(0)):
@@ -260,29 +229,78 @@ def eval_unsupmf(cfg, val_loader, model, criterion, writer=None, writer_iteratio
             mask_iou = iou(masks_k[:, :, 0], gt_seg[i, 0], thres=0.5)  # t s
             iou_max, slot_max = mask_iou.max(dim=1)
 
-            ious[category[i][0]].append(iou_max)
-            frame_id = category[i][1]
-            ious_davis_eval[category[i][0]].append((frame_id.strip().replace('.png', ''), iou_max))
+            
+            if int(mask_iou.max(dim=1)[1]) == 1:
+                f_mask = 1 - f_mask
 
-    frameious = sum(ious.values(), [])
-    frame_mean_iou = torch.cat(frameious).sum().item() * 100 / len(frameious)
-    if 'DAVIS' in cfg.GWM.DATASET.split('+')[0]:
-        logger.info_once("Using DAVIS evaluator methods for evaluting IoU -- mean of mean of sequences without first frame")
-        seq_scores = dict()
-        for c in ious_davis_eval:
-            seq_scores[c] = np.nanmean([v.item() for n, v in ious_davis_eval[c] if int(n) > 1])
+            img = ((1 - f_mask) * 255).cpu().numpy().astype(np.uint8)
+            img = Image.fromarray(img[0])
+            img.save(out_root + category[0][0] + '/' + category[0][1])
+            
+        #     ious[category[i][0]].append(iou(f_mask, gt_seg[i, 0], thres=0.5))
+        #     # ious[category[i][0]].append(iou_max)
+        #     frame_id = category[i][1]
+        #     ious_davis_eval[category[i][0]].append((frame_id.strip().replace('.png', ''), iou_max))
 
-        frame_mean_iou = np.nanmean(list(seq_scores.values())) * 100
+    # frameious = sum(ious.values(), [])
+    # frame_mean_iou = torch.cat(frameious).sum().item() * 100 / len(frameious)
+    # if 'DAVIS' in cfg.GWM.DATASET.split('+')[0]:
+    #     logger.info_once("Using DAVIS evaluator methods for evaluting IoU -- mean of mean of sequences without first frame")
+    #     seq_scores = dict()
+    #     for c in ious_davis_eval:
+    #         seq_scores[c] = np.nanmean([v.item() for n, v in ious_davis_eval[c] if int(n) > 1])
 
-    if writer:
-        header = get_vis_header(images_viz[0].size(2), flow.size(3), header_text)
-        images_viz = torch.cat(images_viz, dim=1)
-        images_viz = torch.cat([header, images_viz], dim=1)
-        writer.add_image('val/images', images_viz, writer_iteration)  # C H W
-        writer.add_scalar('eval/mIoU', frame_mean_iou, writer_iteration)
+    #     frame_mean_iou = np.nanmean(list(seq_scores.values())) * 100
 
-    logger.info(f"mIoU: {frame_mean_iou:.3f} \n")
-    return frame_mean_iou
+    # if writer:
+    #     header = get_vis_header(images_viz[0].size(2), flow.size(3), header_text)
+    #     images_viz = torch.cat(images_viz, dim=1)
+    #     images_viz = torch.cat([header, images_viz], dim=1)
+    #     writer.add_image('val/images', images_viz, writer_iteration)  # C H W
+    #     writer.add_scalar('eval/mIoU', frame_mean_iou, writer_iteration)
+
+    # logger.info(f"mIoU: {frame_mean_iou:.3f} \n")
+    return 0
+
+
+class MaskMerger2:
+    def __init__(self, cfg, model, merger_model="dino_vits8"):
+        self.extractor = ViTExtractor(model_type=merger_model, device=model.device)
+        self.out_dim = 384
+
+        self.mu = torch.tensor(self.extractor.mean).to(model.device).view(1, -1, 1, 1)
+        self.sigma = torch.tensor(self.extractor.std).to(model.device).view(1, -1, 1, 1)
+        self.start_idx = 0
+
+    def get_feats(self, batch):
+        with torch.no_grad():
+            feat = self.extractor.extract_descriptors(batch, facet='key', layer=11, bin=False)
+            feat = feat.reshape(feat.size(0), *self.extractor.num_patches, -1).permute(0, 3, 1, 2)
+            return F.interpolate(feat, batch.shape[-2:], mode='bilinear')
+
+    def spectral(self, A):
+        clustering = SpectralClustering(n_clusters=2,
+                                        affinity='precomputed',
+                                        random_state=0).fit(A.detach().cpu().numpy())
+        return np.arange(A.shape[-1])[clustering.labels_ == 0], np.arange(A.shape[-1])[clustering.labels_ == 1]
+
+    def cos_merge(self, basis, masks):
+        basis = basis / torch.linalg.vector_norm(basis, dim=-1, keepdim=True).clamp(min=1e-6)
+        A = torch.einsum('brc, blc -> brl', basis, basis)[0].clamp(min=1e-6)
+        return A
+
+    def __call__(self, sample, masks_softmaxed):
+        with torch.no_grad():
+            masks_softmaxed = masks_softmaxed[:, self.start_idx:]
+            batch = torch.stack([x['rgb'].to(masks_softmaxed.device) for x in sample], 0) / 255.0
+            features = self.get_feats((batch - self.mu) / self.sigma)
+            A = torch.einsum('brhw, bchw -> bchw', masks_softmaxed, features)
+            A = F.interpolate((masks_softmaxed.argmax(1) > 0.6).float()*features, (96, 96), mode='bilinear')[0].permute(1, 2, 0)
+            fe = A.flatten(0, 1)
+            return fe
+            return {
+                'cos': self.cos_merge(basis, masks_softmaxed),
+            }
 
 
 class MaskMerger:
